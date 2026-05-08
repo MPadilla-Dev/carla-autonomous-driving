@@ -25,6 +25,7 @@ import pygame
 import random
 import time
 import argparse
+import datetime
 
 import custom_ai as ai
 
@@ -69,7 +70,9 @@ def main():
         blueprints = [x for x in blueprints if not x.id.endswith('isetta')]
         # recorder for milestones
         print('starting recorder')
-        client.start_recorder("C:\\Projects\\CARLA\\CARLA_0.9.13\\WindowsNoEditor\\PythonAPI\\examples\\recordings\\m1_run.log", True)  # True = also record additional data
+        path_recording = "C:\\Projects\\CARLA\\CARLA_0.9.13\\WindowsNoEditor\\PythonAPI\\examples\\recordings"
+        label = "m3-run2-pathTest.log"
+        client.start_recorder(os.path.join(path_recording, label), True)  # True = also record additional data
         print("Recorder result:", result)
 
         def try_spawn_random_vehicle_at(transform, vid=""):            
@@ -110,7 +113,7 @@ def main():
         ex2 = [ carla.Vector3D(42.5959,-4.3443,1.8431), carla.Vector3D(-30,167,1.8431)]
         ex3 = [ carla.Vector3D(42.5959,-4.3443,1.8431), carla.Vector3D(22,-4,1.8431), carla.Vector3D(9,-22,1.8431)]
         #ex4 = [ carla.Vector3D(42.5959,-4.3443,1.8431), carla.Vector3D(134,-3,1.8431)]
- 
+
 
         #kzs2 = carla.Vector3D(-85,-23,1.8431)
         
@@ -119,6 +122,15 @@ def main():
         ex = milestones[ms]
         end = ex[len(ex)-1]
         destination = ex[1]
+        for i, point in enumerate(ex):
+            loc = carla.Location(x=point.x, y=point.y, z=point.z + 2.0)
+            world.debug.draw_point(loc, size=0.3,
+                                color=carla.Color(0, 0, 255),  # blue
+                                life_time=120.0)
+            world.debug.draw_string(loc, f"GOAL {i}",
+                                    color=carla.Color(255, 255, 255),
+                                    life_time=120.0)            
+
 
         # Getting waypoint to spawn
         start = get_start_point(world, ex[0])

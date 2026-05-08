@@ -67,7 +67,7 @@ class Executor(object):
     try:
       target_speed = self.knowledge.retrieve_data('target_speed')
     except KeyError:
-      target_speed = 30  # km/h default; Milestone 3 sets this properly via knowledge
+      target_speed = 40  # km/h default; Milestone 3 sets this properly via knowledge
 
     dest_loc = carla.Location(x=destination.x, y=destination.y, z=destination.z)
     distance = vehicle_location.distance(dest_loc)
@@ -98,10 +98,8 @@ class Executor(object):
       # Map angle to [-1, 1]: 90 degrees = full lock
       steer = max(-1.0, min(1.0, angle / (math.pi / 2)))
 
-    if distance < 5.0:
-      throttle = 0.0
-      brake = 0.8
-    elif current_speed < target_speed - 5:
+    # print(f"dest: ({dest_loc.x:.1f},{dest_loc.y:.1f}) dist: {distance:.1f} speed: {current_speed:.1f}")
+    if current_speed < target_speed - 5:
       throttle = 0.7
       brake = 0.0
     elif current_speed < target_speed:
@@ -176,8 +174,44 @@ class Planner(object):
   #TODO: Implementation
   def build_path(self, source, destination):
     self.path = deque([])
-    self.path.append(destination)
-    #TODO: create path of waypoints from source to destination
+
+    if self.vehicle is None:
+        # Fallback: no map access, use direct line
+        self.path.append(destination)
+        return self.path
+
+    carla_map = self.vehicle.get_world().get_map()
+
+    # source comes in as a Transform from custom_ai.py's set_destination
+    if hasattr(source, 'location'):
+        source_loc = source.location
+    else:
+        source_loc = carla.Location(x=source.x, y=source.y, z=source.z)
+
+    dest_loc = carla.Location(x=destination.x, y=destination.y, z=destination.z)
+
+    current_wp = carla_map.get_waypoint(source_loc)
+    step_distance = 2.0       # meters between waypoints
+    max_steps = 1000          # safety cap
+
+    for _ in range(max_steps):
+        wp_loc = current_wp.transform.location
+        if wp_loc.distance(dest_loc) < 5.0:
+            break
+
+        next_wps = current_wp.next(step_distance)
+        if not next_wps:
+            break  # dead end
+
+        # Greedy: pick the next waypoint closest to destination
+        current_wp = min(next_wps,
+                         key=lambda w: w.transform.location.distance(dest_loc))
+
+        self.path.append(current_wp.transform.location)
+
+
+    # Final destination
+    self.path.append(dest_loc)
     return self.path
   
   ### new
