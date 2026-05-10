@@ -71,7 +71,7 @@ def main():
         # recorder for milestones
         print('starting recorder')
         path_recording = "C:\\Projects\\CARLA\\CARLA_0.9.13\\WindowsNoEditor\\PythonAPI\\examples\\recordings"
-        label = "m3-run2-pathTest.log"
+        label = "m3-run3-pathTest.log"
         client.start_recorder(os.path.join(path_recording, label), True)  # True = also record additional data
         print("Recorder result:", result)
 
