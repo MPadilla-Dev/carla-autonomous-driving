@@ -121,7 +121,7 @@ class Executor(object):
     THROTTLE_GAIN = 0.10   # PID output of +5 km/h -> throttle 0.5
     BRAKE_GAIN = 0.05      # PID output of -10 km/h -> brake 0.5
     MAX_THROTTLE = 0.75
-    MAX_BRAKE = 0.6
+    MAX_BRAKE = 1
 
     # Default speed if Knowledge has none yet.
     DEFAULT_TARGET_SPEED = 30.0  # km/h
@@ -503,79 +503,110 @@ class Planner(object):
     # ---- A* -----------------------------------------------------------------
     def _build_path_astar(self, source, destination):
         """
-        A* search over the CARLA waypoint graph.
-        Nodes      : waypoints, identified by (road_id, lane_id, rounded s)
-        Edges      : wp.next(STEP_DISTANCE)
-        Edge cost  : STEP_DISTANCE (uniform)
-        Heuristic  : straight-line distance to goal (admissible)
+        A* over the CARLA road topology graph.
+
+        WHY NOT JUST wp.next() ?
+        ------------------------
+        In CARLA, `waypoint.next()` inside junctions (roundabouts especially)
+        often only returns the continuation lane — exit branches are missed
+        because they live in different road segments connected via the
+        junction object, not via `next()`. That makes raw-`next()` A* think
+        the only way out of a roundabout is to keep going around.
+
+        SOLUTION
+        --------
+        Use carla's GlobalRoutePlanner, which builds a proper topology graph
+        from `Map.get_topology()` (returns (entry_wp, exit_wp) pairs across
+        all roads INCLUDING junction connections) and runs A* on that.
+
+        This is exactly the same algorithm we wrote, just on a graph that
+        actually models the road network correctly.
         """
         path = deque([])
-        carla_map = self.vehicle.get_world().get_map()
+        world = self.vehicle.get_world()
+        carla_map = world.get_map()
         source_loc = self._extract_location(source)
         dest_loc = self._coerce_location(destination)
 
-        start_wp = carla_map.get_waypoint(source_loc)
+        # Snap goal to nearest road waypoint
         goal_wp = carla_map.get_waypoint(dest_loc)
         goal_loc = goal_wp.transform.location
 
-        def wp_key(wp):
-            return (wp.road_id, wp.lane_id, round(wp.s, 1))
+        # Try to import GlobalRoutePlanner from CARLA's PythonAPI/agents folder
+        grp = self._get_global_route_planner(carla_map)
+        if grp is None:
+            print("[Planner A*] GlobalRoutePlanner unavailable, falling back to greedy")
+            return self._build_path_greedy(source, destination)
 
-        def heuristic(wp):
-            return wp.transform.location.distance(goal_loc)
+        # GRP returns list of (waypoint, RoadOption) tuples
+        try:
+            route = grp.trace_route(source_loc, goal_loc)
+            print("[GRP] start:", source_loc)
+            print("[GRP] goal:", goal_loc)
+            print("[GRP] first 5 route waypoints:")
+            for i, (wp, opt) in enumerate(route[:5]):
+                print("  ", i, wp.transform.location, "road_id=", wp.road_id)
+            print("[GRP] last 5 route waypoints:")
+            for i, (wp, opt) in enumerate(route[-5:]):
+                print("  ", len(route)-5+i, wp.transform.location, "road_id=", wp.road_id)
+        except Exception as e:
+            print("[Planner A*] trace_route failed:", e)
+            return self._build_path_greedy(source, destination)
 
-        # Priority queue items: (f, counter, wp).
-        # `counter` breaks ties since carla.Waypoint isn't comparable.
-        counter = 0
-        open_heap = [(heuristic(start_wp), counter, start_wp)]
-        came_from = {}                          # nkey -> (parent_key, parent_wp)
-        g_score = {wp_key(start_wp): 0.0}
-        closed = set()
-        found = False
-        reached = start_wp
+        if not route:
+            print("[Planner A*] empty route, falling back to greedy")
+            return self._build_path_greedy(source, destination)
 
-        for _ in range(self.ASTAR_MAX_ITERATIONS):
-            if not open_heap:
-                break
-            _, _, current = heapq.heappop(open_heap)
-            ckey = wp_key(current)
-            if ckey in closed:
+        # GRP already returns waypoints at ~STEP_DISTANCE spacing. Just use
+        # them directly, dropping consecutive duplicates that GRP emits at
+        # junction transitions.
+        prev_loc = None
+        for wp, _ in route:
+            loc = wp.transform.location
+            if prev_loc is not None and loc.distance(prev_loc) < 0.5:
                 continue
-            closed.add(ckey)
-
-            if current.transform.location.distance(goal_loc) < self.GOAL_TOLERANCE:
-                reached = current
-                found = True
-                break
-
-            for neighbor in current.next(self.STEP_DISTANCE):
-                nkey = wp_key(neighbor)
-                if nkey in closed:
-                    continue
-                tentative_g = g_score[ckey] + self.STEP_DISTANCE
-                if tentative_g < g_score.get(nkey, float('inf')):
-                    came_from[nkey] = (ckey, current)   # parent is `current`
-                    g_score[nkey] = tentative_g
-                    f = tentative_g + heuristic(neighbor)
-                    counter += 1
-                    heapq.heappush(open_heap, (f, counter, neighbor))
-
-        # Reconstruct path
-        if found:
-            chain = [reached]
-            key = wp_key(reached)
-            while key in came_from:
-                parent_key, parent_wp = came_from[key]
-                chain.append(parent_wp)
-                key = parent_key
-            chain.reverse()
-            for wp in chain:
-                path.append(wp.transform.location)
-
-        # Always end with the actual snapped destination
+            path.append(loc)
+            prev_loc = loc
         path.append(goal_loc)
-        print("[Planner A*] found={}, path length={}".format(found, len(path)))
+        print("[Planner A*] GRP route waypoints={}, path length={}".format(
+            len(route), len(path)))
         return path
+
+    def _get_global_route_planner(self, carla_map):
+        """
+        Locate and instantiate carla's GlobalRoutePlanner. Tries multiple
+        possible locations; returns None if it can't find it.
+        """
+        # Try import paths in order
+        candidates = []
+        carla_root = os.environ.get('CARLA_ROOT', None)
+        here = os.path.dirname(os.path.abspath(__file__))
+        if carla_root:
+            candidates.append(os.path.join(carla_root, 'PythonAPI', 'carla'))
+        candidates.append(os.path.join(here, '..', 'carla'))                 # examples/../carla
+        candidates.append(os.path.join(here, '..', '..', 'PythonAPI', 'carla'))
+        for c in candidates:
+            if os.path.isdir(c) and c not in sys.path:
+                sys.path.append(c)
+        try:
+            from agents.navigation.global_route_planner import GlobalRoutePlanner
+        except ImportError:
+            try:
+                # Older CARLA versions also need the DAO
+                from agents.navigation.global_route_planner_dao import GlobalRoutePlannerDAO
+                from agents.navigation.global_route_planner import GlobalRoutePlanner
+                dao = GlobalRoutePlannerDAO(carla_map, self.STEP_DISTANCE)
+                grp = GlobalRoutePlanner(dao)
+                grp.setup()
+                return grp
+            except ImportError:
+                return None
+        # Newer CARLA (>= 0.9.12) takes (map, sampling_resolution) directly
+        try:
+            grp = GlobalRoutePlanner(carla_map, self.STEP_DISTANCE)
+            return grp
+        except TypeError:
+            return None
 
     # -------------------------------------------------------------------------
     # Visualization

@@ -186,10 +186,10 @@ class Analyser(object):
     # ---- TUNABLE: FEATURE TOGGLES (great for demo A/B) ----------------------
     OBSTACLE_AVOIDANCE_ENABLED = True
     TRAFFIC_LIGHT_ENABLED = True
-    USE_POSTED_SPEED_LIMIT = True   # if True, target_speed follows road signs
+    USE_POSTED_SPEED_LIMIT = False   # if True, target_speed follows road signs
 
     # ---- TUNABLE: SPEED ------------------------------------------------------
-    NORMAL_TARGET_SPEED = 35.0    # km/h - cruise speed when no other constraint
+    NORMAL_TARGET_SPEED = 50.0    # km/h - cruise speed when no other constraint
     HEALING_TARGET_SPEED = 18.0   # km/h - slow during evasive maneuver
 
     # ---- TUNABLE: LIDAR THREAT DETECTION (M2) -------------------------------

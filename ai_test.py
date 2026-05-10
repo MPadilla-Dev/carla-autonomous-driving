@@ -71,7 +71,7 @@ def main():
         # recorder for milestones
         print('starting recorder')
         path_recording = "C:\\Projects\\CARLA\\CARLA_0.9.13\\WindowsNoEditor\\PythonAPI\\examples\\recordings"
-        label = "m3-t2-astar.log"
+        label = "m3-t2-astar-run3-DONE.log"
         client.start_recorder(os.path.join(path_recording, label), True)  # True = also record additional data
         print("Recorder result:", result)
 
@@ -155,7 +155,7 @@ def main():
         autopilot.set_destination(destination)
         autopilot.set_route_finished_callback(route_finished)
 
-        if ms == 1:
+        if ms == 2:
             print("Spawning malicious actor...")
             spawn = start.get_right_lane()
             mal = try_spawn_random_vehicle_at(spawn.transform, "vehicle.nissan.micra")
