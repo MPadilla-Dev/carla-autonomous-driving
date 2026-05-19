@@ -121,7 +121,7 @@ class Executor(object):
     THROTTLE_GAIN = 0.10   # PID output of +5 km/h -> throttle 0.5
     BRAKE_GAIN = 0.05      # PID output of -10 km/h -> brake 0.5
     MAX_THROTTLE = 0.75
-    MAX_BRAKE = 1
+    MAX_BRAKE = 0.6
 
     # Default speed if Knowledge has none yet.
     DEFAULT_TARGET_SPEED = 30.0  # km/h
@@ -323,12 +323,12 @@ class Planner(object):
     """
 
     # ---- TUNABLE: PLANNER MODE ----------------------------------------------
-    PLANNER_MODE = 'astar'   # 'greedy' or 'astar'
+    PLANNER_MODE = 'greedy'   # 'greedy' or 'astar'
 
     # ---- TUNABLE: PATH GENERATION -------------------------------------------
     STEP_DISTANCE = 2.0        # meters between waypoints
-    GOAL_TOLERANCE = 5.0       # meters - "close enough" to goal in search
-    GREEDY_MAX_STEPS = 1500    # safety cap on greedy iterations
+    GOAL_TOLERANCE = 3.0       # meters - "close enough" to goal in search
+    GREEDY_MAX_STEPS = 100    # safety cap on greedy iterations
     ASTAR_MAX_ITERATIONS = 8000  # safety cap on A* node expansions
 
     # ---- TUNABLE: VISUALIZATION ---------------------------------------------
@@ -477,26 +477,72 @@ class Planner(object):
     # ---- Greedy -------------------------------------------------------------
     def _build_path_greedy(self, source, destination):
         path = deque([])
-        carla_map = self.vehicle.get_world().get_map()
+        world = self.vehicle.get_world()
+        carla_map = world.get_map()
         source_loc = self._extract_location(source)
         dest_loc = self._coerce_location(destination)
+
+        FORK_PEEK = 15.0   # used only when a fork is detected at the small step
+
+        fork_colors = [
+            carla.Color(0, 255, 255), carla.Color(255, 0, 255),
+            carla.Color(255, 255, 0), carla.Color(255, 128, 0),
+        ]
 
         current_wp = carla_map.get_waypoint(source_loc)
         for i in range(self.GREEDY_MAX_STEPS):
             wp_loc = current_wp.transform.location
             if wp_loc.distance(dest_loc) < self.GOAL_TOLERANCE:
                 break
-            next_wps = current_wp.next(self.STEP_DISTANCE)
-            if not next_wps:
-                break
-            current_wp = min(
-                next_wps,
-                key=lambda w: w.transform.location.distance(dest_loc))
-            path.append(current_wp.transform.location)
 
-        # Snap final destination to road
+            # Small-step peek: detects fork presence cheaply
+            small_peek = current_wp.next(self.STEP_DISTANCE)
+            if not small_peek:
+                break
+
+            if len(small_peek) > 1 and wp_loc.distance(dest_loc) > FORK_PEEK:
+                big_peek = current_wp.next(FORK_PEEK)
+                if not big_peek or len(big_peek) < 2:
+                    big_peek = small_peek
+
+                target = min(big_peek, key=lambda w: w.transform.location.distance(dest_loc))
+
+                # Visualize and debug
+                print("FORK: small={} big={} options".format(len(small_peek), len(big_peek)))
+                origin = carla.Location(x=wp_loc.x, y=wp_loc.y, z=wp_loc.z + 2.0)
+                world.debug.draw_point(origin, size=0.4,
+                    color=carla.Color(255, 255, 0), life_time=120.0)
+                for idx, w in enumerate(big_peek):
+                    d = w.transform.location.distance(dest_loc)
+                    chosen_marker = " <-- CHOSEN" if w is target else ""
+                    print("  opt{}: {} dist={:.1f}{}".format(
+                        idx, w.transform.location, d, chosen_marker))
+                    color = fork_colors[idx % len(fork_colors)]
+                    opt_loc = carla.Location(
+                        x=w.transform.location.x, y=w.transform.location.y,
+                        z=w.transform.location.z + 2.0)
+                    world.debug.draw_point(opt_loc, size=0.35, color=color, life_time=120.0)
+                    world.debug.draw_line(origin, opt_loc, thickness=0.15,
+                        color=color, life_time=120.0)
+
+                # Jump directly to the chosen big-step waypoint
+                current_wp = target
+                path.append(current_wp.transform.location)
+            else:
+                current_wp = small_peek[0]
+                path.append(current_wp.transform.location)
+
+        # Trim waypoints past the goal
+        trimmed = deque()
+        for wp_loc in path:
+            trimmed.append(wp_loc)
+            if wp_loc.distance(dest_loc) < self.GOAL_TOLERANCE:
+                break
+        path = trimmed
+
         final_wp = carla_map.get_waypoint(dest_loc)
-        path.append(final_wp.transform.location)
+        if not path or path[-1].distance(final_wp.transform.location) > self.GOAL_TOLERANCE:
+            path.append(final_wp.transform.location)
         print("[Planner GREEDY] path length:", len(path))
         return path
 
@@ -530,6 +576,18 @@ class Planner(object):
 
         # Snap goal to nearest road waypoint
         goal_wp = carla_map.get_waypoint(dest_loc)
+        start_wp = carla_map.get_waypoint(source_loc)
+        # FIX: prefer same-direction lane. Opposite lane_id signs = opposite
+        # travel directions in CARLA. If the user-given goal coordinate snaps
+        # to the opposite-direction lane (very common for off-road or roughly-
+        # specified destinations), GRP will route the LONG way around to enter
+        # that lane the right way. Mirror to the matching-direction lane.
+        if goal_wp.lane_id * start_wp.lane_id < 0:
+            candidate = goal_wp.get_left_lane()
+            if candidate is not None and \
+                    candidate.lane_id * start_wp.lane_id > 0:
+                print("[Planner A*] goal snapped to opposite lane, mirroring")
+                goal_wp = candidate
         goal_loc = goal_wp.transform.location
 
         # Try to import GlobalRoutePlanner from CARLA's PythonAPI/agents folder
@@ -541,14 +599,6 @@ class Planner(object):
         # GRP returns list of (waypoint, RoadOption) tuples
         try:
             route = grp.trace_route(source_loc, goal_loc)
-            print("[GRP] start:", source_loc)
-            print("[GRP] goal:", goal_loc)
-            print("[GRP] first 5 route waypoints:")
-            for i, (wp, opt) in enumerate(route[:5]):
-                print("  ", i, wp.transform.location, "road_id=", wp.road_id)
-            print("[GRP] last 5 route waypoints:")
-            for i, (wp, opt) in enumerate(route[-5:]):
-                print("  ", len(route)-5+i, wp.transform.location, "road_id=", wp.road_id)
         except Exception as e:
             print("[Planner A*] trace_route failed:", e)
             return self._build_path_greedy(source, destination)
@@ -557,17 +607,22 @@ class Planner(object):
             print("[Planner A*] empty route, falling back to greedy")
             return self._build_path_greedy(source, destination)
 
-        # GRP already returns waypoints at ~STEP_DISTANCE spacing. Just use
-        # them directly, dropping consecutive duplicates that GRP emits at
-        # junction transitions.
+        # GRP returns waypoints already spaced at ~STEP_DISTANCE (we pass
+        # STEP_DISTANCE as sampling_resolution to GRP). Use them directly,
+        # dropping consecutive duplicates that GRP emits at junction
+        # transitions (these are what made the car loop in earlier runs).
+        # NOTE: we do NOT append the original goal_loc at the end. GRP already
+        # routes to the snapped goal_wp; appending the raw user destination
+        # creates a "teleport-target" off-road waypoint, which made the car
+        # cut through buildings on the last segment.
         prev_loc = None
+        DEDUP_THRESHOLD = 0.5  # meters - drop waypoints closer than this to prev
         for wp, _ in route:
             loc = wp.transform.location
-            if prev_loc is not None and loc.distance(prev_loc) < 0.5:
+            if prev_loc is not None and loc.distance(prev_loc) < DEDUP_THRESHOLD:
                 continue
             path.append(loc)
             prev_loc = loc
-        path.append(goal_loc)
         print("[Planner A*] GRP route waypoints={}, path length={}".format(
             len(route), len(path)))
         return path

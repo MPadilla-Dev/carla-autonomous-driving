@@ -94,20 +94,19 @@ class Knowledge(object):
         Updates status, but blocks transitions out of CRASHED unless going
         to HEALING. This is the original logic, preserved.
         """
-        if (self.status != Status.CRASHED or new_status == Status.HEALING) \
-                and self.status != new_status:
+        if ((self.status != Status.CRASHED or new_status == Status.HEALING)
+                and self.status != new_status):
             self.set_status(new_status)
             self.status_changed(new_status)
+            return True
+        return False
 
     # -------------------------------------------------------------------------
     # Memory access
     # -------------------------------------------------------------------------
     def retrieve_data(self, data_name, default=None):
         """
-        Safer than the original - returns `default` if the key is missing
-        instead of raising KeyError.
-
-        TUNABLE: change `default=None` if you want a different fallback.
+        Returns `default` if the key is missing instead of raising KeyError.
         """
         return self.memory.get(data_name, default)
 
@@ -132,6 +131,7 @@ class Knowledge(object):
         the destination to never update. 0.5 m is small enough to pass
         every real change, big enough to ignore numeric noise.
         """
+        # TODO: Try no threshold
         ARRIVAL_FILTER_THRESHOLD = 0.5
         if self.distance(self.destination, new_destination) > ARRIVAL_FILTER_THRESHOLD:
             self.destination = new_destination

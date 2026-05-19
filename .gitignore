@@ -26,6 +26,6 @@ visualize_multiple_sensors.py
 show_recorder_actors_blocked.py
 show_recorder_collisions.py
 tutorial.py
-
+debug.py
 # Misc
 *.log

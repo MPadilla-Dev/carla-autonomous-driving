@@ -184,25 +184,25 @@ class Analyser(object):
     """
 
     # ---- TUNABLE: FEATURE TOGGLES (great for demo A/B) ----------------------
-    OBSTACLE_AVOIDANCE_ENABLED = True
-    TRAFFIC_LIGHT_ENABLED = True
+    OBSTACLE_AVOIDANCE_ENABLED = False
+    TRAFFIC_LIGHT_ENABLED = False
     USE_POSTED_SPEED_LIMIT = False   # if True, target_speed follows road signs
 
     # ---- TUNABLE: SPEED ------------------------------------------------------
     NORMAL_TARGET_SPEED = 50.0    # km/h - cruise speed when no other constraint
-    HEALING_TARGET_SPEED = 18.0   # km/h - slow during evasive maneuver
+    HEALING_TARGET_SPEED = 15.0   # km/h - slow during evasive maneuver
 
     # ---- TUNABLE: LIDAR THREAT DETECTION (M2) -------------------------------
     # Define a danger zone in front of the car (in lidar-local coords).
     # Any cluster of points in this zone for >= THREAT_FRAMES_TO_TRIGGER frames
     # counts as a threat.
-    THREAT_FORWARD_MIN = 0.5      # meters - ignore points right at the bumper
-    THREAT_FORWARD_MAX = 9.0      # meters - how far ahead to look
-    THREAT_LATERAL_HALF_WIDTH = 3.5  # meters - how wide the cone is
+    THREAT_FORWARD_MIN = -4.0      # meters - ignore points right at the bumper
+    THREAT_FORWARD_MAX = 12.0      # meters - how far ahead to look
+    THREAT_LATERAL_HALF_WIDTH = 5.5  # meters - how wide the cone is
     THREAT_HEIGHT_MIN = -0.3      # meters - ignore ground returns
     THREAT_HEIGHT_MAX = 2.0       # meters - ignore overhead structures
-    THREAT_MIN_POINTS = 8         # how many points qualify as a real object
-    THREAT_FRAMES_TO_TRIGGER = 3  # consecutive ticks before flagging
+    THREAT_MIN_POINTS = 5         # how many points qualify as a real object
+    THREAT_FRAMES_TO_TRIGGER = 2  # consecutive ticks before flagging
 
     # ---- TUNABLE: HEALING DURATION ------------------------------------------
     HEALING_FRAMES = 60           # ticks to stay in HEALING before re-planning
@@ -280,6 +280,18 @@ class Analyser(object):
     # -------------------------------------------------------------------------
     def _update_threat_detection(self):
         points = self.knowledge.retrieve_data('lidar_points', None)
+
+        # Debug print - show nearby points in the original point cloud
+        # if points is not None and len(points) > 50:
+        #     x = points[:, 0]; y = points[:, 1]; z = points[:, 2]
+        #     # Vehicles only - filter ground (z < -0.3) and very high stuff
+        #     veh = (z > -0.3) & (z < 2.0) & (np.abs(x) < 15) & (np.abs(y) < 8)
+        #     if np.count_nonzero(veh) > 5:
+        #         print("[lidar] near pts: n={} x[{:.1f},{:.1f}] y[{:.1f},{:.1f}]".format(
+        #             int(np.count_nonzero(veh)),
+        #             float(x[veh].min()), float(x[veh].max()),
+        #             float(y[veh].min()), float(y[veh].max())))
+        
         if points is None or len(points) == 0:
             self._threat_frames = 0
             self.knowledge.update_data('obstacle_threat', False)
@@ -297,7 +309,10 @@ class Analyser(object):
             (z <= self.THREAT_HEIGHT_MAX)
         )
         n_in_zone = int(np.count_nonzero(in_zone))
-
+        if n_in_zone > 0:
+            # Debug print - show points in the danger zone
+            print("[lidar] points in zone: {} (need {})".format(
+            n_in_zone, self.THREAT_MIN_POINTS))
         if n_in_zone >= self.THREAT_MIN_POINTS:
             self._threat_frames += 1
             # Determine threat direction (+y = right, -y = left in lidar local)
@@ -315,6 +330,7 @@ class Analyser(object):
 
     def _enter_healing(self):
         """Switch to HEALING and ask Planner for an escape path."""
+        print(">>> HEALING triggered, escape direction:", self.last_threat_direction)
         self.knowledge.update_status(Status.HEALING)
         self._healing_frames_left = self.HEALING_FRAMES
         # Reset threat counter so we need fresh evidence to re-trigger after healing

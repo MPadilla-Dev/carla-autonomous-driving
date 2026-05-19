@@ -9,6 +9,7 @@
 import glob
 import os
 import sys
+from unittest import result
 
 try:
     sys.path.append(glob.glob('**/*%d.%d-%s.egg' % (
@@ -24,6 +25,7 @@ import pygame
 import random
 import time
 import argparse
+import datetime
 
 import custom_ai as ai
 
@@ -66,6 +68,12 @@ def main():
         blueprints = world.get_blueprint_library().filter('vehicle.*')
         blueprints = [x for x in blueprints if int(x.get_attribute('number_of_wheels')) == 4]
         blueprints = [x for x in blueprints if not x.id.endswith('isetta')]
+        # recorder for milestones
+        print('starting recorder')
+        path_recording = "C:\\Projects\\CARLA\\CARLA_0.9.13\\WindowsNoEditor\\PythonAPI\\examples\\recordings"
+        label = "m1.log"
+        client.start_recorder(os.path.join(path_recording, label), True)  # True = also record additional data
+        print("Recorder result:", result)
 
         def try_spawn_random_vehicle_at(transform, vid=""):            
             if vid != "":
@@ -104,8 +112,10 @@ def main():
         ex1 = [ carla.Vector3D(42.5959,-4.3443,1.8431), carla.Vector3D(22,-4,1.8431), carla.Vector3D(9,-22,1.8431)]
         ex2 = [ carla.Vector3D(42.5959,-4.3443,1.8431), carla.Vector3D(-30,167,1.8431)]
         ex3 = [ carla.Vector3D(42.5959,-4.3443,1.8431), carla.Vector3D(22,-4,1.8431), carla.Vector3D(9,-22,1.8431)]
-        #ex4 = [ carla.Vector3D(42.5959,-4.3443,1.8431), carla.Vector3D(134,-3,1.8431)]
- 
+        # my points for testing
+        # ex1 = [ carla.Vector3D(44.1,-207.4,1.8431), carla.Vector3D(-2.5,-45.6,1.8431), carla.Vector3D(-27.1,165.7,1.8431)]
+        # ex4 = [ carla.Vector3D(42.5959,-4.3443,1.8431), carla.Vector3D(134,-3,1.8431)]
+
 
         #kzs2 = carla.Vector3D(-85,-23,1.8431)
         
@@ -115,6 +125,17 @@ def main():
         end = ex[len(ex)-1]
         destination = ex[1]
 
+        # Drawing the points in the world for visualization
+        for i, point in enumerate(ex):
+            loc = carla.Location(x=point.x, y=point.y, z=point.z + 2.0)
+            world.debug.draw_point(loc, size=0.3,
+                                color=carla.Color(0, 0, 255),  # blue
+                                life_time=120.0)
+            world.debug.draw_string(loc, f"GOAL {i}",
+                                    color=carla.Color(255, 255, 255),
+                                    life_time=120.0)            
+
+
         # Getting waypoint to spawn
         start = get_start_point(world, ex[0])
         # Spawning
@@ -122,7 +143,7 @@ def main():
 
         if vehicle == None:
             return
-        # Setting autopilot
+         # Setting autopilot
         def route_finished(autopilot):
             pos = autopilot.get_vehicle().get_transform().location
             print ("Vehicle arrived at destination: ", pos)
@@ -181,6 +202,8 @@ def main():
         print('destroying actors')
         for actor in actor_list:
             actor.destroy()
+        print('stopping recorder')
+        client.stop_recorder()
         print('done.')
 
         pygame.quit()
