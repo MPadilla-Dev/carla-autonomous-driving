@@ -70,10 +70,12 @@ def main():
         blueprints = [x for x in blueprints if not x.id.endswith('isetta')]
         # recorder for milestones
         print('starting recorder')
-        path_recording = "C:\\Projects\\CARLA\\CARLA_0.9.13\\WindowsNoEditor\\PythonAPI\\examples\\presentation"
-        label = "m1_threshold_aim_take1.log"
-        client.start_recorder(os.path.join(path_recording, label), True)  # True = also record additional data
-        print("Recorder result:", result)
+        rec_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recordings")
+        os.makedirs(rec_dir, exist_ok=True)
+        label = "m{}_run_{}.log".format(args.milestone_number, time.strftime("%H%M%S"))
+        rec_result = client.start_recorder(os.path.join(rec_dir, label), True)
+        print("Recorder result:", rec_result)
+
 
         def try_spawn_random_vehicle_at(transform, vid=""):            
             if vid != "":

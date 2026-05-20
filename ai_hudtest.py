@@ -284,9 +284,7 @@ def main():
 
         # ---- Recorder ------------------------------------------------------
         if not args.no_record:
-            rec_dir = os.path.join(
-                "C:\\Projects\\CARLA\\CARLA_0.9.13\\WindowsNoEditor",
-                "PythonAPI", "examples", "presentation")
+            rec_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recordings")
             os.makedirs(rec_dir, exist_ok=True)
             label = args.label or "m{}_hud_{}.log".format(
                 args.milestone_number, time.strftime("%H%M%S"))
