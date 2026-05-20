@@ -167,6 +167,25 @@ Main loop (ai_hudtest / ai_modtest / spawn_custom_npc_record)
 
 All inter-module communication flows through the `Knowledge` blackboard. No module calls another directly, which makes it straightforward to swap algorithms (e.g. change `STEER_MODE`) without touching any other module.
 
+---
+
+## Team
+
+Most of the work was done collaboratively. The split below reflects primary ownership rather than exclusive authorship.
+
+**Matin Moradi — Control & Sensing**
+- `ai_knowledge.py` — blackboard design, Status enum, arrival logic
+- `ai_parser.py` — Monitor (lidar, lane invasion, traffic light sensors) and Analyser (threat detection, speed control, healing state machine)
+- `ai_control.py` — Executor: both steering modes (aim-at-next, pure pursuit), both throttle modes (threshold, PID), and the PIDController class
+
+**Manuel Padilla — Planning & Integration**
+- `ai_control.py` — Planner: greedy and A* path building, escape path logic, path visualization
+- `custom_ai.py` — Autopilot wiring, telemetry interface
+- `ai_hudtest.py` — pygame HUD, chase camera, telemetry overlay, synchronous mode setup
+- `spawn_custom_npc_record.py` — multi-vehicle stress test, per-vehicle collision and healing tracking
+- Testing scripts (`ai_test.py`, `ai_modtest.py`, `spawn_hudview.py`)
+
+
 ## Demo videos
 All milestone recordings are available here:
 [Google Drive — Demo Videos](https://drive.google.com/drive/folders/1PNJ3RwJwwOncB9w1EClW7YTBrN3qZSEj?usp=sharing)
