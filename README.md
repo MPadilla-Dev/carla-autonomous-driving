@@ -166,3 +166,7 @@ Main loop (ai_hudtest / ai_modtest / spawn_custom_npc_record)
 ```
 
 All inter-module communication flows through the `Knowledge` blackboard. No module calls another directly, which makes it straightforward to swap algorithms (e.g. change `STEER_MODE`) without touching any other module.
+
+## Demo videos
+All milestone recordings are available here:
+[Google Drive — Demo Videos](https://drive.google.com/drive/folders/1PNJ3RwJwwOncB9w1EClW7YTBrN3qZSEj?usp=sharing)
