@@ -86,7 +86,7 @@ class Monitor(object):
         lidar_bp.set_attribute('rotation_frequency', str(self.LIDAR_ROTATION_FREQ))
         lidar_bp.set_attribute('channels', str(self.LIDAR_CHANNELS))
         lidar_bp.set_attribute('points_per_second', str(self.LIDAR_POINTS_PER_SECOND))
-        lidar_tf = carla.Transform(carla.Location(x=0.0, y=0.0, z=self.LIDAR_HEIGHT))
+        lidar_tf = carla.Transform(carla.Location(x=0.0, y=0.0, z=self.LIDAR_HEIGHT), carla.Rotation(yaw=0.0))
         lidar_sensor = world.spawn_actor(lidar_bp, lidar_tf, attach_to=self.vehicle)
         lidar_sensor.listen(lambda data: Monitor._on_lidar(weak_self, data))
         self.sensors.append(lidar_sensor)
@@ -184,34 +184,44 @@ class Analyser(object):
     """
 
     # ---- TUNABLE: FEATURE TOGGLES (great for demo A/B) ----------------------
-    OBSTACLE_AVOIDANCE_ENABLED = False
-    TRAFFIC_LIGHT_ENABLED = False
+    OBSTACLE_AVOIDANCE_ENABLED = True
+    TRAFFIC_LIGHT_ENABLED = True
     USE_POSTED_SPEED_LIMIT = False   # if True, target_speed follows road signs
 
     # ---- TUNABLE: SPEED ------------------------------------------------------
     NORMAL_TARGET_SPEED = 50.0    # km/h - cruise speed when no other constraint
-    HEALING_TARGET_SPEED = 15.0   # km/h - slow during evasive maneuver
+    HEALING_TARGET_SPEED = 30.0   # km/h - slow during evasive maneuver
 
     # ---- TUNABLE: LIDAR THREAT DETECTION (M2) -------------------------------
-    # Define a danger zone in front of the car (in lidar-local coords).
-    # Any cluster of points in this zone for >= THREAT_FRAMES_TO_TRIGGER frames
-    # counts as a threat.
-    THREAT_FORWARD_MIN = -4.0      # meters - ignore points right at the bumper
-    THREAT_FORWARD_MAX = 12.0      # meters - how far ahead to look
-    THREAT_LATERAL_HALF_WIDTH = 5.5  # meters - how wide the cone is
-    THREAT_HEIGHT_MIN = -0.3      # meters - ignore ground returns
-    THREAT_HEIGHT_MAX = 2.0       # meters - ignore overhead structures
-    THREAT_MIN_POINTS = 5         # how many points qualify as a real object
+    THREAT_FORWARD_MIN = 2      # meters - ignore points right at the bumper
+    THREAT_FORWARD_MAX = 9.0      # meters - how far ahead to look
+    THREAT_LATERAL_HALF_WIDTH = 1.25 # meters - how wide the cone is
+    
+    # CHANGE THESE TWO LINES:
+    THREAT_HEIGHT_MIN = -2     # meters - Look down towards the car (avoids the -2.5m ground)
+    THREAT_HEIGHT_MAX = 1.5       # meters - Roof level of standard cars relative to Lidar
+    
+    THREAT_MIN_POINTS = 10        # how many points qualify as a real object
     THREAT_FRAMES_TO_TRIGGER = 2  # consecutive ticks before flagging
 
     # ---- TUNABLE: HEALING DURATION ------------------------------------------
     HEALING_FRAMES = 60           # ticks to stay in HEALING before re-planning
+
+    # ---- TUNABLE: AVOIDANCE STRATEGY ----------------------------------------
+    # 'escape' - build escape path and swerve around the obstacle (M2 default)
+    # 'brake'  - just stop and wait for threat to clear, then resume route
+    AVOIDANCE_MODE = 'stopgo'   # 'escape' or 'brake' or 'stopgo' (brake with timeout, then escape if still present)
+    MAX_BRAKE_WAIT_FRAMES = 200
+
+    # Frames to brake-and-wait between threat re-checks in 'brake' mode
+    BRAKE_HOLD_FRAMES = 10
 
     def __init__(self, knowledge):
         self.knowledge = knowledge
         # State for threat-detection debouncing
         self._threat_frames = 0
         self._healing_frames_left = 0
+        self._healing_phase = 'none'      # Tracks 'braking' or 'escaping'
         # Set by Autopilot so we can request an escape path or re-plan
         self.planner = None
         self.original_destination = None
@@ -236,14 +246,43 @@ class Analyser(object):
         if self.knowledge.get_status() == Status.HEALING:
             self._healing_frames_left -= 1
             if self._healing_frames_left <= 0:
-                # Re-plan back to original goal
-                if self.planner is not None and self.original_destination is not None:
+                
+                if self._healing_phase == 'braking':
+                    # Re-scan Lidar directly
+                    points = self.knowledge.retrieve_data('lidar_points', None)
+                    still_threatened = False
+                    if points is not None and len(points) > 0:
+                        x = points[:, 0]; y = points[:, 1]; z = points[:, 2]
+                        in_zone = ((x >= self.THREAT_FORWARD_MIN) & (x <= self.THREAT_FORWARD_MAX) &
+                                   (np.abs(y) <= self.THREAT_LATERAL_HALF_WIDTH) &
+                                   (z >= self.THREAT_HEIGHT_MIN) & (z <= self.THREAT_HEIGHT_MAX))
+                        
+                        # HYSTERESIS: Only require 3 points to hold the brake, smoothing out dropped frames
+                        still_threatened = int(np.count_nonzero(in_zone)) >= 3
+                    
+                    if not still_threatened:
+                        print(">>> Threat cleared, resuming DRIVING")
+                        self._healing_phase = 'none'
+                        self.knowledge.update_status(Status.DRIVING)
+                    else:
+                        self._brake_wait_frames += self.BRAKE_HOLD_FRAMES
+                        if self.AVOIDANCE_MODE == 'stopgo' and self._brake_wait_frames >= self.MAX_BRAKE_WAIT_FRAMES:
+                            print(">>> Obstacle stuck, switching to ESCAPE")
+                            self._healing_phase = 'escaping'
+                            self._healing_frames_left = self.HEALING_FRAMES
+                            if self.planner is not None:
+                                self.planner.build_escape_path(self.last_threat_direction)
+                        else:
+                            self._healing_frames_left = self.BRAKE_HOLD_FRAMES
+                
+                elif self._healing_phase == 'escaping':
+                    print(">>> Lane change complete, resuming DRIVING")
+                    self._healing_phase = 'none'
                     self.knowledge.update_status(Status.DRIVING)
-                    veh_tf = carla.Transform(self.knowledge.get_location())
-                    self.planner.make_plan(veh_tf, self.original_destination)
-                else:
-                    self.knowledge.update_status(Status.DRIVING)
-            return  # don't re-trigger HEALING during HEALING
+                    if self.planner is not None and self.original_destination is not None:
+                        # Re-plan to original goal from new lane
+                        self.planner.make_plan(self.knowledge.get_location(), self.original_destination)
+            return
 
         # 3) Threat detection (M2)
         if self.OBSTACLE_AVOIDANCE_ENABLED:
@@ -253,10 +292,16 @@ class Analyser(object):
     # Speed control
     # -------------------------------------------------------------------------
     def _update_target_speed(self):
+        # 1. Handle HEALING speed overrides
         if self.knowledge.get_status() == Status.HEALING:
-            self.knowledge.update_data('target_speed', self.HEALING_TARGET_SPEED)
+            if self._healing_phase == 'braking':
+                self.knowledge.update_data('target_speed', 0.0)
+            else:
+                # 'escaping' phase needs speed to change lanes
+                self.knowledge.update_data('target_speed', self.HEALING_TARGET_SPEED)
             return
 
+        # 2. Handle Traffic Lights
         if self.TRAFFIC_LIGHT_ENABLED:
             at_tl = self.knowledge.retrieve_data('at_lights', False)
             tl_state = self.knowledge.retrieve_data('traffic_light_state', None)
@@ -264,7 +309,7 @@ class Analyser(object):
                 self.knowledge.update_data('target_speed', 0.0)
                 return
 
-        # Otherwise: posted speed limit (capped at NORMAL_TARGET_SPEED) or just NORMAL.
+        # 3. Handle Normal Cruising
         if self.USE_POSTED_SPEED_LIMIT:
             posted = self.knowledge.retrieve_data('speed_limit', self.NORMAL_TARGET_SPEED)
             if posted is None or posted <= 0:
@@ -280,17 +325,11 @@ class Analyser(object):
     # -------------------------------------------------------------------------
     def _update_threat_detection(self):
         points = self.knowledge.retrieve_data('lidar_points', None)
-
-        # Debug print - show nearby points in the original point cloud
-        # if points is not None and len(points) > 50:
-        #     x = points[:, 0]; y = points[:, 1]; z = points[:, 2]
-        #     # Vehicles only - filter ground (z < -0.3) and very high stuff
-        #     veh = (z > -0.3) & (z < 2.0) & (np.abs(x) < 15) & (np.abs(y) < 8)
-        #     if np.count_nonzero(veh) > 5:
-        #         print("[lidar] near pts: n={} x[{:.1f},{:.1f}] y[{:.1f},{:.1f}]".format(
-        #             int(np.count_nonzero(veh)),
-        #             float(x[veh].min()), float(x[veh].max()),
-        #             float(y[veh].min()), float(y[veh].max())))
+        # debug print
+        # if points is None:
+        #     print("[threat] lidar_points is None")
+        #     return
+        # print("[threat] points={}, frames={}".format(len(points), self._threat_frames))
         
         if points is None or len(points) == 0:
             self._threat_frames = 0
@@ -309,10 +348,18 @@ class Analyser(object):
             (z <= self.THREAT_HEIGHT_MAX)
         )
         n_in_zone = int(np.count_nonzero(in_zone))
-        if n_in_zone > 0:
-            # Debug print - show points in the danger zone
-            print("[lidar] points in zone: {} (need {})".format(
-            n_in_zone, self.THREAT_MIN_POINTS))
+        # print("[threat] in_zone={} (need {}), frames={}".format(
+        #     n_in_zone, self.THREAT_MIN_POINTS, self._threat_frames))
+        if len(points) > 100:
+            x = points[:, 0]; y = points[:, 1]; z = points[:, 2]
+            # veh_mask = (z > -0.3) & (z < 2.0) & (x > 0) & (x < 20) & (np.abs(y) < 6)
+            # if np.count_nonzero(veh_mask) > 5:
+            #     print("  forward pts: n={} x[{:.1f},{:.1f}] y[{:.1f},{:.1f}]".format(
+            #         int(np.count_nonzero(veh_mask)),
+            #         float(x[veh_mask].min()), float(x[veh_mask].max()),
+            #         float(y[veh_mask].min()), float(y[veh_mask].max())))
+
+
         if n_in_zone >= self.THREAT_MIN_POINTS:
             self._threat_frames += 1
             # Determine threat direction (+y = right, -y = left in lidar local)
@@ -329,11 +376,17 @@ class Analyser(object):
             self._enter_healing()
 
     def _enter_healing(self):
-        """Switch to HEALING and ask Planner for an escape path."""
-        print(">>> HEALING triggered, escape direction:", self.last_threat_direction)
+        print(f">>> HEALING triggered, mode: {self.AVOIDANCE_MODE}, direction: {self.last_threat_direction}")
         self.knowledge.update_status(Status.HEALING)
-        self._healing_frames_left = self.HEALING_FRAMES
-        # Reset threat counter so we need fresh evidence to re-trigger after healing
         self._threat_frames = 0
-        if self.planner is not None:
-            self.planner.build_escape_path(self.last_threat_direction)
+
+        if self.AVOIDANCE_MODE in ['brake', 'stopgo']:
+            self._healing_phase = 'braking'
+            self._brake_wait_frames = 0
+            self._healing_frames_left = self.BRAKE_HOLD_FRAMES
+            self.knowledge.update_data('target_speed', 0.0)
+        else:
+            self._healing_phase = 'escaping'
+            self._healing_frames_left = self.HEALING_FRAMES
+            if self.planner is not None:
+                self.planner.build_escape_path(self.last_threat_direction)

@@ -70,8 +70,8 @@ def main():
         blueprints = [x for x in blueprints if not x.id.endswith('isetta')]
         # recorder for milestones
         print('starting recorder')
-        path_recording = "C:\\Projects\\CARLA\\CARLA_0.9.13\\WindowsNoEditor\\PythonAPI\\examples\\recordings"
-        label = "m1.log"
+        path_recording = "C:\\Projects\\CARLA\\CARLA_0.9.13\\WindowsNoEditor\\PythonAPI\\examples\\presentation"
+        label = "m1_threshold_aim_take1.log"
         client.start_recorder(os.path.join(path_recording, label), True)  # True = also record additional data
         print("Recorder result:", result)
 
@@ -198,7 +198,11 @@ def main():
             time.sleep(0.05)
 
     finally:
-
+        if autopilot is not None:
+            try:
+                autopilot.destroy()
+            except Exception:
+                pass
         print('destroying actors')
         for actor in actor_list:
             actor.destroy()

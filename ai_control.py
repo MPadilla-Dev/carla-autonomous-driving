@@ -99,7 +99,7 @@ class Executor(object):
     # 'aim'          - simple: aim at next waypoint (original behavior).
     # 'pure_pursuit' - smoother: aim at a point LOOKAHEAD_DISTANCE meters
     #                  ahead along the path. Recommended.
-    STEER_MODE = 'pure_pursuit'
+    STEER_MODE = 'pure_pursuit'  # 'aim' or 'pure_pursuit'
 
     # ---- TUNABLE: PURE PURSUIT PARAMETERS -----------------------------------
     # Lookahead distance grows with speed: Ld = LOOKAHEAD_BASE + LOOKAHEAD_K * speed
@@ -112,7 +112,7 @@ class Executor(object):
     # ---- TUNABLE: SPEED CONTROL ---------------------------------------------
     # PID gains. Defaults are conservative; tune per vehicle.
     PID_KP = 0.4
-    PID_KI = 0.05
+    PID_KI = 0.1
     PID_KD = 0.05
 
     # When PID output is positive, throttle. Negative -> brake.
@@ -122,6 +122,11 @@ class Executor(object):
     BRAKE_GAIN = 0.05      # PID output of -10 km/h -> brake 0.5
     MAX_THROTTLE = 0.75
     MAX_BRAKE = 0.6
+
+    # ---- TUNABLE: THROTTLE/BRAKE ALGORITHM ----------------------------------
+    # 'pid'       - PID on speed error (smooth, holds target speed)
+    # 'threshold' - original: full throttle if below target, brake if above
+    THROTTLE_MODE = 'pid'
 
     # Default speed if Knowledge has none yet.
     DEFAULT_TARGET_SPEED = 30.0  # km/h
@@ -242,10 +247,18 @@ class Executor(object):
     def _throttle_brake(self, current_speed_kmh, target_speed_kmh, dt_s):
         """PID on speed error. Positive output -> throttle, negative -> brake."""
         # Special case: target_speed = 0 means "stop now" (red light).
+        # print("Current speed: %.2f km/h, Target speed: %.2f km/h" % (current_speed_kmh, target_speed_kmh))
+        if self.THROTTLE_MODE == 'threshold':
+            # Original-style: bang-bang control
+            if current_speed_kmh < target_speed_kmh:
+                return 1, 0.0   # fixed throttle
+            else:
+                return 0.0, 1   # fixed brake
+
         if target_speed_kmh <= 0.1:
             self.speed_pid.reset()
             return 0.0, self.MAX_BRAKE
-
+        # PID Mode
         error = target_speed_kmh - current_speed_kmh
         u = self.speed_pid.step(error, dt_s)
 
@@ -323,12 +336,12 @@ class Planner(object):
     """
 
     # ---- TUNABLE: PLANNER MODE ----------------------------------------------
-    PLANNER_MODE = 'greedy'   # 'greedy' or 'astar'
+    PLANNER_MODE = 'astar'   # 'greedy' or 'astar' or none
 
     # ---- TUNABLE: PATH GENERATION -------------------------------------------
     STEP_DISTANCE = 2.0        # meters between waypoints
-    GOAL_TOLERANCE = 3.0       # meters - "close enough" to goal in search
-    GREEDY_MAX_STEPS = 100    # safety cap on greedy iterations
+    GOAL_TOLERANCE = 5.0       # meters - "close enough" to goal in search
+    GREEDY_MAX_STEPS = 105    # safety cap on greedy iterations
     ASTAR_MAX_ITERATIONS = 8000  # safety cap on A* node expansions
 
     # ---- TUNABLE: VISUALIZATION ---------------------------------------------
@@ -349,6 +362,19 @@ class Planner(object):
     # -------------------------------------------------------------------------
     def make_plan(self, source, destination):
         """Build the full plan from source to destination and start driving."""
+        if self.PLANNER_MODE == 'none':
+            # No planning: path is just the raw destination. Executor steers
+            # directly toward it. update_plan() will still pop it on arrival
+            # and set ARRIVED, so stopping works the same as with planning.
+            dest_loc = self._coerce_location(destination)
+            self.path = deque([dest_loc])
+            self._publish_path_locations()
+            self.knowledge.update_destination(dest_loc)
+            self.knowledge.update_status(Status.DRIVING)
+            if self.DRAW_PATH:
+                self._draw_path(color=carla.Color(255, 0, 0))
+            return
+ 
         self.path = self.build_path(source, destination)
         self._publish_path_locations()
         self.update_plan()
@@ -401,58 +427,48 @@ class Planner(object):
     def build_escape_path(self, threat_direction='right'):
         """
         Used when Analyser flags an incoming threat (M2). Generates a short
-        escape path that swerves AWAY from the threat.
-
-        Replaces self.path with the escape sequence. After the escape ends
-        you should call make_plan() again to resume the original route.
+        escape path by changing to an adjacent valid driving lane.
         """
         if self.vehicle is None:
             return
 
         carla_map = self.vehicle.get_world().get_map()
-        veh_tf = self.vehicle.get_transform()
+        veh_loc = self.vehicle.get_transform().location
+        current_wp = carla_map.get_waypoint(veh_loc)
 
-        # Direction to swerve: opposite of threat
-        swerve = -1 if threat_direction == 'right' else 1   # +1 = left
+        # 1. Determine which lane is safest to jump to
+        target_wp = None
+        if threat_direction == 'right':
+            # Threat is on the right, try left lane first
+            target_wp = current_wp.get_left_lane()
+            # If left is not a driving lane (e.g. sidewalk), check if right is open
+            if target_wp is None or target_wp.lane_type != carla.LaneType.Driving:
+                target_wp = current_wp.get_right_lane()
+        else:
+            # Threat is on the left, try right lane first
+            target_wp = current_wp.get_right_lane()
+            if target_wp is None or target_wp.lane_type != carla.LaneType.Driving:
+                target_wp = current_wp.get_left_lane()
 
-        # Forward unit
-        fwd = veh_tf.get_forward_vector()
-        # Right unit. Prefer CARLA's built-in (works on most 0.9.x). Falls back
-        # to derivation from yaw. CARLA convention: at yaw=0 (facing +x), the
-        # car's right is +y, so right_unit = (-sin(yaw), cos(yaw)).
-        try:
-            right_vec = veh_tf.rotation.get_right_vector()
-            right_x, right_y = right_vec.x, right_vec.y
-        except Exception:
-            yaw_rad = math.radians(veh_tf.rotation.yaw)
-            right_x = -math.sin(yaw_rad)
-            right_y = math.cos(yaw_rad)
-
-        veh_loc = veh_tf.location
-        offset = self.ESCAPE_LATERAL_OFFSET * swerve
-        forward_d = self.ESCAPE_FORWARD_DISTANCE
-
-        # Build a few escape waypoints: a swerve-out, glide, and re-center.
         escape_points = []
-        # Phase 1: short forward + swerve
-        p1 = carla.Location(
-            x=veh_loc.x + fwd.x * forward_d * 0.4 + right_x * offset,
-            y=veh_loc.y + fwd.y * forward_d * 0.4 + right_y * offset,
-            z=veh_loc.z)
-        escape_points.append(p1)
-        # Phase 2: forward, hold lateral
-        p2 = carla.Location(
-            x=veh_loc.x + fwd.x * forward_d * 0.7 + right_x * offset,
-            y=veh_loc.y + fwd.y * forward_d * 0.7 + right_y * offset,
-            z=veh_loc.z)
-        escape_points.append(p2)
-        # Phase 3: re-center to road
-        p3_world = carla.Location(
-            x=veh_loc.x + fwd.x * forward_d,
-            y=veh_loc.y + fwd.y * forward_d,
-            z=veh_loc.z)
-        p3_wp = carla_map.get_waypoint(p3_world)
-        escape_points.append(p3_wp.transform.location)
+
+        # 2. Build the path along the new lane
+        if target_wp is not None and target_wp.lane_type == carla.LaneType.Driving:
+            # Move diagonally into the new lane
+            mid_wps = target_wp.next(self.ESCAPE_FORWARD_DISTANCE * 0.5)
+            if mid_wps:
+                escape_points.append(mid_wps[0].transform.location)
+            
+            # Stabilize in the new lane
+            far_wps = target_wp.next(self.ESCAPE_FORWARD_DISTANCE)
+            if far_wps:
+                escape_points.append(far_wps[0].transform.location)
+        else:
+            # NO VALID LANE TO ESCAPE TO (trapped!). 
+            # Fallback: drop a waypoint right in front to trigger hard braking.
+            fwd = self.vehicle.get_transform().get_forward_vector()
+            panic_stop = carla.Location(x=veh_loc.x + fwd.x, y=veh_loc.y + fwd.y, z=veh_loc.z)
+            escape_points.append(panic_stop)
 
         self.path = deque(escape_points)
         self._publish_path_locations()
@@ -485,8 +501,8 @@ class Planner(object):
         FORK_PEEK = 15.0   # used only when a fork is detected at the small step
 
         fork_colors = [
-            carla.Color(0, 255, 255), carla.Color(255, 0, 255),
-            carla.Color(255, 255, 0), carla.Color(255, 128, 0),
+            carla.Color(0, 120, 120), carla.Color(120, 0, 120),
+            carla.Color(120, 120, 0), carla.Color(120, 60, 0),
         ]
 
         current_wp = carla_map.get_waypoint(source_loc)
@@ -540,10 +556,11 @@ class Planner(object):
                 break
         path = trimmed
 
-        final_wp = carla_map.get_waypoint(dest_loc)
-        if not path or path[-1].distance(final_wp.transform.location) > self.GOAL_TOLERANCE:
-            path.append(final_wp.transform.location)
+        # final_wp = carla_map.get_waypoint(dest_loc)
+        # if not path or path[-1].distance(final_wp.transform.location) > self.GOAL_TOLERANCE:
+        #     path.append(final_wp.transform.location)
         print("[Planner GREEDY] path length:", len(path))
+        path.append(dest_loc)
         return path
 
     # ---- A* -----------------------------------------------------------------
@@ -625,6 +642,7 @@ class Planner(object):
             prev_loc = loc
         print("[Planner A*] GRP route waypoints={}, path length={}".format(
             len(route), len(path)))
+        # path.append(dest_loc)
         return path
 
     def _get_global_route_planner(self, carla_map):

@@ -177,8 +177,13 @@ def main():
             time.sleep(0.05)
 
     finally:
-
+        if autopilot is not None:
+            try:
+                autopilot.destroy()
+            except Exception:
+                pass
         print('destroying actors')
+
         for actor in actor_list:
             actor.destroy()
         print('done.')

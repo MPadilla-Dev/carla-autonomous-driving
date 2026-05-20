@@ -143,7 +143,7 @@ class Knowledge(object):
         "arrived" at a waypoint. 5 m is the project default. Smaller =
         more precise but car may struggle to actually stop within tolerance.
         """
-        ARRIVAL_RADIUS = 5.0
+        ARRIVAL_RADIUS = 5
         return self.distance(self.get_location(), destination) < ARRIVAL_RADIUS
 
     # -------------------------------------------------------------------------

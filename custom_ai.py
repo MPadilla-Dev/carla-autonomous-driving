@@ -107,6 +107,7 @@ class Autopilot(object):
         if a HEALING detour happens, we can re-plan back to the same goal.
         """
         self.analyser.remember_destination(destination)
+        
         self.planner.make_plan(self.vehicle.get_transform(), destination)
 
     # -------------------------------------------------------------------------
